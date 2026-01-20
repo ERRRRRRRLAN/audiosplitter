@@ -36,10 +36,10 @@ const elements = {
     downloadAllBtn: document.getElementById('downloadAllBtn')
 };
 
-// ===== FFmpeg Initialization (v0.11 Single Threaded SIMPLE) =====
+// ===== FFmpeg Initialization (Clean Slate v0.11 ST) =====
 async function loadFFmpeg() {
     try {
-        log('Memuat FFmpeg.wasm (v0.11 ST)...', 'info');
+        log('Initializing FFmpeg...', 'info');
 
         if (typeof FFmpeg === 'undefined') {
             throw new Error('FFmpeg library not loaded');
@@ -47,15 +47,15 @@ async function loadFFmpeg() {
 
         const { createFFmpeg, fetchFile } = FFmpeg;
 
-        // Use the explicit Single Threaded Core URL
-        // This avoids SharedArrayBuffer requirements completely
-        const coreUrl = 'https://unpkg.com/@ffmpeg/core-st@0.11.1/dist/ffmpeg-core.js';
+        // Use jsDelivr for absolute stability
+        // Pointing to specific Single Threaded Core
+        const corePath = 'https://cdn.jsdelivr.net/npm/@ffmpeg/core-st@0.11.1/dist/ffmpeg-core.js';
 
-        log(`Menginisialisasi Core dari: ${coreUrl}`, 'info');
+        log(`Loading Core from: jsDelivr`, 'info');
 
         ffmpegInstance = createFFmpeg({
             log: true,
-            corePath: coreUrl,
+            corePath: corePath,
             logger: ({ message }) => log(message, 'info'),
             progress: ({ ratio }) => {
                 const percentage = Math.round(ratio * 100);
@@ -66,22 +66,16 @@ async function loadFFmpeg() {
         await ffmpegInstance.load();
 
         updateFFmpegStatus(true);
-        log('FFmpeg berhasil dimuat! (Mode: Single Threaded)', 'success');
+        log('FFmpeg Ready! (Single Threaded Mode)', 'success');
 
-        // Expose fetchFile
+        // Expose fetchFile global for convenience
         window.fetchFile = fetchFile;
 
         return true;
     } catch (error) {
         console.error('Error loading FFmpeg:', error);
-        log(`Error: ${error.message}`, 'error');
-
-        // Fallback or helpful message if it fails
-        if (error.message.includes('SharedArrayBuffer')) {
-            alert('Browser Anda membutuhkan update atau tidak mendukung fitur keamanan yang diperlukan.');
-        } else {
-            alert('Gagal memuat FFmpeg. Pastikan koneksi internet Anda stabil.');
-        }
+        log(`Fatal Error: ${error.message}`, 'error');
+        alert('Gagal memuat FFmpeg. Mohon refresh halaman.');
         return false;
     }
 }
@@ -176,7 +170,7 @@ function resetUpload() {
     elements.controls.classList.add('hidden');
 }
 
-// ===== Audio Processing (v0.11.x Logic) =====
+// ===== Audio Processing =====
 async function processAudio() {
     if (!currentFile) return;
     if (!ffmpegInstance || !ffmpegInstance.isLoaded()) {
@@ -200,17 +194,16 @@ async function processAudio() {
     elements.consoleLog.innerHTML = '';
 
     try {
-        log('Membaca file input...', 'info');
+        log('Reading input file...', 'info');
         const inputFileName = 'input' + getFileExtension(currentFile.name);
         ffmpegInstance.FS('writeFile', inputFileName, await window.fetchFile(currentFile));
 
-        log('Memulai proses pemisahan audio...', 'info');
+        log('Starting processing...', 'info');
         elements.processingStatus.textContent = 'Memotong audio...';
 
         const outputExtension = getFileExtension(currentFile.name);
         const outputPattern = `output%03d${outputExtension}`;
 
-        // Use v0.11 run() method
         await ffmpegInstance.run(
             '-i', inputFileName,
             '-f', 'segment',
@@ -219,7 +212,7 @@ async function processAudio() {
             outputPattern
         );
 
-        log('Proses pemisahan selesai! Mengumpulkan segmen...', 'success');
+        log('Processing complete!', 'success');
         elements.processingStatus.textContent = 'Memproses hasil...';
         updateProgress(90);
 
@@ -242,11 +235,10 @@ async function processAudio() {
             }
         }
 
-        log('Membersihkan file sementara...', 'info');
         ffmpegInstance.FS('unlink', inputFileName);
 
         updateProgress(100);
-        log(`Berhasil! Total ${audioSegments.length} segmen dibuat.`, 'success');
+        log(`Success! Created ${audioSegments.length} segments.`, 'success');
 
         setTimeout(() => {
             displayResults();
@@ -294,7 +286,6 @@ function displayResults() {
     });
 }
 
-// ===== Download Functions =====
 function downloadSegment(index) {
     const segment = audioSegments[index];
     const a = document.createElement('a');
@@ -311,7 +302,6 @@ function downloadAll() {
     });
 }
 
-// ===== Reset Functions =====
 function resetToUpload() {
     elements.processingSection.classList.add('hidden');
     elements.resultsSection.classList.add('hidden');
@@ -320,7 +310,6 @@ function resetToUpload() {
     audioSegments = [];
 }
 
-// ===== Event Listeners =====
 elements.dropZone.addEventListener('click', () => elements.fileInput.click());
 elements.dropZone.addEventListener('dragover', (e) => { e.preventDefault(); elements.dropZone.classList.add('dragover'); });
 elements.dropZone.addEventListener('dragleave', () => elements.dropZone.classList.remove('dragover'));
@@ -336,5 +325,4 @@ elements.newFileBtn.addEventListener('click', resetToUpload);
 elements.downloadAllBtn.addEventListener('click', downloadAll);
 window.downloadSegment = downloadSegment;
 
-// ===== Initialize =====
 loadFFmpeg();
