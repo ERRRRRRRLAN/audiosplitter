@@ -36,71 +36,53 @@ const elements = {
     downloadAllBtn: document.getElementById('downloadAllBtn')
 };
 
-// ===== FFmpeg Initialization (v0.12.x Single Threaded) =====
+// ===== FFmpeg Initialization (v0.11 Single Threaded BULLETPROOF) =====
 async function loadFFmpeg() {
     try {
-        log('Memuat FFmpeg.wasm (Single Threaded)...', 'info');
+        log('Memuat FFmpeg.wasm (v0.11 ST)...', 'info');
 
-        // Ensure FFmpeg 0.12 UMD is loaded
-        if (typeof FFmpegWASM === 'undefined' || typeof FFmpegWASM.FFmpeg === 'undefined') {
+        if (typeof FFmpeg === 'undefined') {
             throw new Error('FFmpeg library not loaded');
         }
 
-        const { FFmpeg } = FFmpegWASM;
-        const { fetchFile, toBlobURL } = FFmpegUtil;
+        const { createFFmpeg, fetchFile } = FFmpeg;
 
-        // Create new instance
-        ffmpegInstance = new FFmpeg();
+        // 1. Define the Single Threaded Core URL (v0.11.0 is stable for ST)
+        const coreScriptUrl = 'https://unpkg.com/@ffmpeg/core-st@0.11.1/dist/ffmpeg-core.js';
 
-        // Setup loggers
-        ffmpegInstance.on('log', ({ message }) => log(message, 'info'));
-        ffmpegInstance.on('progress', ({ progress }) => {
-            const percentage = Math.round(progress * 100);
-            updateProgress(percentage);
+        // 2. Fetch the Core Script content
+        log('Mengunduh Core Script...', 'info');
+        const response = await fetch(coreScriptUrl);
+        if (!response.ok) throw new Error(`Gagal download core: ${response.statusText}`);
+        const scriptText = await response.text();
+
+        // 3. Create a Blob URL for the script
+        // This tricks the browser into thinking the worker is "local" (same-origin), avoiding CORS errors
+        const blob = new Blob([scriptText], { type: 'text/javascript' });
+        const coreBlobUrl = URL.createObjectURL(blob);
+
+        log('Menginisialisasi Core...', 'info');
+
+        // 4. Initialize FFmpeg with the Blob URL
+        // We set mainName to 'main' to match what 0.11 expects in some configs, 
+        // but corePath is the key.
+        ffmpegInstance = createFFmpeg({
+            log: true,
+            corePath: coreBlobUrl,
+            logger: ({ message }) => log(message, 'info'),
+            progress: ({ ratio }) => {
+                const percentage = Math.round(ratio * 100);
+                updateProgress(percentage);
+            }
         });
 
-        // Load Core (Explicitly using Single Threaded compatible URL)
-        // We use unpkg direct URLs for core-st 0.12 (MT is default, ST is separate build in 0.12)
-        // Actually, for 0.12, we can just point to the standard core if we don't have headers? 
-        // No, standard core crashes. We need to point to a core that doesn't use threads. 
-        // Core ST URL: @ffmpeg/core-mt (default) vs ... wait 0.12 separated them differently.
-        // Let's use the toBlobURL pattern for 0.12 which is standard.
-        // BUT, if we want ST, we should use a specific core URL if available. 
-        // However, 0.12 automatically degrades BUT requires proxies if not.
-        // Better strategy: Use the specific ST build for 0.12.6
-
-        const baseURL = 'https://unpkg.com/@ffmpeg/core@0.12.6/dist/esm';
-        // Note: usage of ESM inside UMD wrapper might be tricky, but fetchFile handles it.
-        // Let's try the standard load first, catching error if SharedArrayBuffer is missing.
-        // Actually, standard load() of 0.12 tries to detect environment.
-        // If we want to FORCE single threaded (no SharedArrayBuffer), we should provide the coreURL 
-        // pointing to a single-threaded build OR handle the error.
-        // There is no official "core-st" package on unpkg for 0.12 easily accessible. 
-        // The safest bet for "Perfect" stability without headers is to use the 0.12 CORE but loaded in main thread? 
-        // No, 0.12 uses workers by default.
-        // Let's stick to the 0.12 standard load. If SharedArrayBuffer is missing, 0.12 throws.
-        // UNLESS we use the special single-threaded build.
-        // URL for ST: https://unpkg.com/@ffmpeg/core-mt@0.12.6/dist/esm/ffmpeg-core.js (MT)
-        // URL for ST: https://unpkg.com/@ffmpeg/core@0.12.6/dist/esm/ffmpeg-core.js (Default is often MT?)
-        // Let's use the explicit ST build provided by community or official channels if possible.
-        // Actually, let's use the one from a known working ST CDN or fallback to 0.11 logic?
-        // NO, we promised 0.12 "perfect". 
-        // Let's use: https://unpkg.com/@ffmpeg/core-mt@0.12.6 (Multi Threaded)
-        // https://unpkg.com/@ffmpeg/core@0.12.6 (Single Threaded?? No, usually default is ST in older versions, but 0.12 made MT default).
-
-        // CORRECTION: For 0.12, core is ST by default? No.
-        // Documentation says: @ffmpeg/core is Single Threaded. @ffmpeg/core-mt is Multi Threaded.
-        // SO: We just need to load @ffmpeg/core (not core-mt).
-
-        const coreBase = 'https://unpkg.com/@ffmpeg/core@0.12.6/dist/esm';
-
-        await ffmpegInstance.load({
-            coreURL: await toBlobURL(`${coreBase}/ffmpeg-core.js`, 'text/javascript'),
-            wasmURL: await toBlobURL(`${coreBase}/ffmpeg-core.wasm`, 'application/wasm'),
-        });
+        await ffmpegInstance.load();
 
         updateFFmpegStatus(true);
-        log('FFmpeg berhasil dimuat!', 'success');
+        log('FFmpeg berhasil dimuat! (Mode: Single Threaded)', 'success');
+
+        // Expose fetchFile
+        window.fetchFile = fetchFile;
 
         return true;
     } catch (error) {
@@ -201,10 +183,10 @@ function resetUpload() {
     elements.controls.classList.add('hidden');
 }
 
-// ===== Audio Processing (v0.12.x Logic) =====
+// ===== Audio Processing (v0.11.x Logic) =====
 async function processAudio() {
     if (!currentFile) return;
-    if (!ffmpegInstance) { // 0.12 check
+    if (!ffmpegInstance || !ffmpegInstance.isLoaded()) {
         alert('FFmpeg belum siap. Mohon tunggu...');
         return;
     }
@@ -225,40 +207,36 @@ async function processAudio() {
     elements.consoleLog.innerHTML = '';
 
     try {
-        // Write input file
         log('Membaca file input...', 'info');
-        const { fetchFile } = FFmpegUtil;
         const inputFileName = 'input' + getFileExtension(currentFile.name);
-        await ffmpegInstance.writeFile(inputFileName, await fetchFile(currentFile));
+        ffmpegInstance.FS('writeFile', inputFileName, await window.fetchFile(currentFile));
 
         log('Memulai proses pemisahan audio...', 'info');
         elements.processingStatus.textContent = 'Memotong audio...';
 
-        // Execute FFmpeg command
         const outputExtension = getFileExtension(currentFile.name);
         const outputPattern = `output%03d${outputExtension}`;
 
-        // 0.12 uses exec instead of run
-        await ffmpegInstance.exec([
+        // Use v0.11 run() method
+        await ffmpegInstance.run(
             '-i', inputFileName,
             '-f', 'segment',
             '-segment_time', splitSeconds.toString(),
             '-c', 'copy',
             outputPattern
-        ]);
+        );
 
         log('Proses pemisahan selesai! Mengumpulkan segmen...', 'success');
         elements.processingStatus.textContent = 'Memproses hasil...';
         updateProgress(90);
 
-        // Read all output files
+        // Read output files
         audioSegments = [];
-        const files = await ffmpegInstance.listDir('/'); // 0.12 listDir
+        const files = ffmpegInstance.FS('readdir', '/');
 
-        for (const fileItem of files) {
-            const fileName = fileItem.name;
+        for (const fileName of files) {
             if (fileName.startsWith('output') && fileName.endsWith(outputExtension)) {
-                const data = await ffmpegInstance.readFile(fileName);
+                const data = ffmpegInstance.FS('readFile', fileName);
                 const blob = new Blob([data.buffer], { type: currentFile.type });
                 const url = URL.createObjectURL(blob);
 
@@ -271,15 +249,12 @@ async function processAudio() {
             }
         }
 
-        // Clean up
         log('Membersihkan file sementara...', 'info');
-        await ffmpegInstance.deleteFile(inputFileName); // 0.12 deleteFile
-        // Manually deleting outputs often good practice in long running sessions
+        ffmpegInstance.FS('unlink', inputFileName);
 
         updateProgress(100);
         log(`Berhasil! Total ${audioSegments.length} segmen dibuat.`, 'success');
 
-        // Show results
         setTimeout(() => {
             displayResults();
         }, 500);
@@ -300,14 +275,12 @@ function getFileExtension(filename) {
 function displayResults() {
     elements.processingSection.classList.add('hidden');
     elements.resultsSection.classList.remove('hidden');
-
     elements.resultsGrid.innerHTML = '';
 
     audioSegments.forEach((segment, index) => {
         const card = document.createElement('div');
         card.className = 'result-card';
         card.style.animationDelay = `${index * 0.05}s`;
-
         card.innerHTML = `
             <div class="result-header">
                 <div class="result-icon">🎵</div>
@@ -324,7 +297,6 @@ function displayResults() {
                 <span>Download</span>
             </button>
         `;
-
         elements.resultsGrid.appendChild(card);
     });
 }
@@ -342,7 +314,7 @@ function downloadAll() {
     audioSegments.forEach((segment, index) => {
         setTimeout(() => {
             downloadSegment(index);
-        }, index * 200); // Stagger downloads
+        }, index * 200);
     });
 }
 
@@ -356,47 +328,20 @@ function resetToUpload() {
 }
 
 // ===== Event Listeners =====
-// Drag & Drop
-elements.dropZone.addEventListener('click', () => {
-    elements.fileInput.click();
-});
-
-elements.dropZone.addEventListener('dragover', (e) => {
-    e.preventDefault();
-    elements.dropZone.classList.add('dragover');
-});
-
-elements.dropZone.addEventListener('dragleave', () => {
-    elements.dropZone.classList.remove('dragover');
-});
-
+elements.dropZone.addEventListener('click', () => elements.fileInput.click());
+elements.dropZone.addEventListener('dragover', (e) => { e.preventDefault(); elements.dropZone.classList.add('dragover'); });
+elements.dropZone.addEventListener('dragleave', () => elements.dropZone.classList.remove('dragover'));
 elements.dropZone.addEventListener('drop', (e) => {
     e.preventDefault();
     elements.dropZone.classList.remove('dragover');
-    const file = e.dataTransfer.files[0];
-    handleFileSelect(file);
+    handleFileSelect(e.dataTransfer.files[0]);
 });
-
-// File Input
-elements.fileInput.addEventListener('change', (e) => {
-    const file = e.target.files[0];
-    handleFileSelect(file);
-});
-
-// Remove File
+elements.fileInput.addEventListener('change', (e) => handleFileSelect(e.target.files[0]));
 elements.removeFile.addEventListener('click', resetUpload);
-
-// Start Processing
 elements.startBtn.addEventListener('click', processAudio);
-
-// New File
 elements.newFileBtn.addEventListener('click', resetToUpload);
-
-// Download All
 elements.downloadAllBtn.addEventListener('click', downloadAll);
-
-// Make downloadSegment available globally
 window.downloadSegment = downloadSegment;
 
-// ===== Initialize App =====
+// ===== Initialize =====
 loadFFmpeg();
