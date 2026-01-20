@@ -36,37 +36,71 @@ const elements = {
     downloadAllBtn: document.getElementById('downloadAllBtn')
 };
 
-// ===== FFmpeg Initialization (v0.11.x) =====
+// ===== FFmpeg Initialization (v0.12.x Single Threaded) =====
 async function loadFFmpeg() {
     try {
-        log('Memuat FFmpeg.wasm (v0.11)...', 'info');
+        log('Memuat FFmpeg.wasm (Single Threaded)...', 'info');
 
-        // FFmpeg 0.11 is loaded via script tag in index.html
-        // We can access it directly from the global window object
-        if (typeof FFmpeg === 'undefined') {
+        // Ensure FFmpeg 0.12 UMD is loaded
+        if (typeof FFmpegWASM === 'undefined' || typeof FFmpegWASM.FFmpeg === 'undefined') {
             throw new Error('FFmpeg library not loaded');
         }
 
-        const { createFFmpeg, fetchFile } = FFmpeg;
+        const { FFmpeg } = FFmpegWASM;
+        const { fetchFile, toBlobURL } = FFmpegUtil;
 
-        // Create FFmpeg instance with single-threaded core
-        ffmpegInstance = createFFmpeg({
-            log: true,
-            corePath: 'https://unpkg.com/@ffmpeg/core@0.11.0/dist/ffmpeg-core.js',
-            logger: ({ message }) => log(message, 'info'),
-            progress: ({ ratio }) => {
-                const percentage = Math.round(ratio * 100);
-                updateProgress(percentage);
-            }
+        // Create new instance
+        ffmpegInstance = new FFmpeg();
+
+        // Setup loggers
+        ffmpegInstance.on('log', ({ message }) => log(message, 'info'));
+        ffmpegInstance.on('progress', ({ progress }) => {
+            const percentage = Math.round(progress * 100);
+            updateProgress(percentage);
         });
 
-        await ffmpegInstance.load();
+        // Load Core (Explicitly using Single Threaded compatible URL)
+        // We use unpkg direct URLs for core-st 0.12 (MT is default, ST is separate build in 0.12)
+        // Actually, for 0.12, we can just point to the standard core if we don't have headers? 
+        // No, standard core crashes. We need to point to a core that doesn't use threads. 
+        // Core ST URL: @ffmpeg/core-mt (default) vs ... wait 0.12 separated them differently.
+        // Let's use the toBlobURL pattern for 0.12 which is standard.
+        // BUT, if we want ST, we should use a specific core URL if available. 
+        // However, 0.12 automatically degrades BUT requires proxies if not.
+        // Better strategy: Use the specific ST build for 0.12.6
+
+        const baseURL = 'https://unpkg.com/@ffmpeg/core@0.12.6/dist/esm';
+        // Note: usage of ESM inside UMD wrapper might be tricky, but fetchFile handles it.
+        // Let's try the standard load first, catching error if SharedArrayBuffer is missing.
+        // Actually, standard load() of 0.12 tries to detect environment.
+        // If we want to FORCE single threaded (no SharedArrayBuffer), we should provide the coreURL 
+        // pointing to a single-threaded build OR handle the error.
+        // There is no official "core-st" package on unpkg for 0.12 easily accessible. 
+        // The safest bet for "Perfect" stability without headers is to use the 0.12 CORE but loaded in main thread? 
+        // No, 0.12 uses workers by default.
+        // Let's stick to the 0.12 standard load. If SharedArrayBuffer is missing, 0.12 throws.
+        // UNLESS we use the special single-threaded build.
+        // URL for ST: https://unpkg.com/@ffmpeg/core-mt@0.12.6/dist/esm/ffmpeg-core.js (MT)
+        // URL for ST: https://unpkg.com/@ffmpeg/core@0.12.6/dist/esm/ffmpeg-core.js (Default is often MT?)
+        // Let's use the explicit ST build provided by community or official channels if possible.
+        // Actually, let's use the one from a known working ST CDN or fallback to 0.11 logic?
+        // NO, we promised 0.12 "perfect". 
+        // Let's use: https://unpkg.com/@ffmpeg/core-mt@0.12.6 (Multi Threaded)
+        // https://unpkg.com/@ffmpeg/core@0.12.6 (Single Threaded?? No, usually default is ST in older versions, but 0.12 made MT default).
+
+        // CORRECTION: For 0.12, core is ST by default? No.
+        // Documentation says: @ffmpeg/core is Single Threaded. @ffmpeg/core-mt is Multi Threaded.
+        // SO: We just need to load @ffmpeg/core (not core-mt).
+
+        const coreBase = 'https://unpkg.com/@ffmpeg/core@0.12.6/dist/esm';
+
+        await ffmpegInstance.load({
+            coreURL: await toBlobURL(`${coreBase}/ffmpeg-core.js`, 'text/javascript'),
+            wasmURL: await toBlobURL(`${coreBase}/ffmpeg-core.wasm`, 'application/wasm'),
+        });
 
         updateFFmpegStatus(true);
         log('FFmpeg berhasil dimuat!', 'success');
-
-        // Expose fetchFile for later use
-        window.fetchFile = fetchFile;
 
         return true;
     } catch (error) {
@@ -100,7 +134,6 @@ function log(message, type = 'info') {
 }
 
 function updateProgress(percentage) {
-    // FFmpeg 0.11 might give ratio > 1 or < 0 sometimes
     percentage = Math.max(0, Math.min(100, percentage));
     elements.progressFill.style.width = `${percentage}%`;
     elements.progressText.textContent = `${percentage}%`;
@@ -168,10 +201,10 @@ function resetUpload() {
     elements.controls.classList.add('hidden');
 }
 
-// ===== Audio Processing (v0.11.x) =====
+// ===== Audio Processing (v0.12.x Logic) =====
 async function processAudio() {
     if (!currentFile) return;
-    if (!ffmpegInstance || !ffmpegInstance.isLoaded()) {
+    if (!ffmpegInstance) { // 0.12 check
         alert('FFmpeg belum siap. Mohon tunggu...');
         return;
     }
@@ -192,10 +225,11 @@ async function processAudio() {
     elements.consoleLog.innerHTML = '';
 
     try {
-        // Write input file to FFmpeg virtual filesystem
+        // Write input file
         log('Membaca file input...', 'info');
+        const { fetchFile } = FFmpegUtil;
         const inputFileName = 'input' + getFileExtension(currentFile.name);
-        ffmpegInstance.FS('writeFile', inputFileName, await window.fetchFile(currentFile));
+        await ffmpegInstance.writeFile(inputFileName, await fetchFile(currentFile));
 
         log('Memulai proses pemisahan audio...', 'info');
         elements.processingStatus.textContent = 'Memotong audio...';
@@ -204,13 +238,14 @@ async function processAudio() {
         const outputExtension = getFileExtension(currentFile.name);
         const outputPattern = `output%03d${outputExtension}`;
 
-        await ffmpegInstance.run(
+        // 0.12 uses exec instead of run
+        await ffmpegInstance.exec([
             '-i', inputFileName,
             '-f', 'segment',
             '-segment_time', splitSeconds.toString(),
             '-c', 'copy',
             outputPattern
-        );
+        ]);
 
         log('Proses pemisahan selesai! Mengumpulkan segmen...', 'success');
         elements.processingStatus.textContent = 'Memproses hasil...';
@@ -218,11 +253,12 @@ async function processAudio() {
 
         // Read all output files
         audioSegments = [];
-        const files = ffmpegInstance.FS('readdir', '/');
+        const files = await ffmpegInstance.listDir('/'); // 0.12 listDir
 
-        for (const fileName of files) {
+        for (const fileItem of files) {
+            const fileName = fileItem.name;
             if (fileName.startsWith('output') && fileName.endsWith(outputExtension)) {
-                const data = ffmpegInstance.FS('readFile', fileName);
+                const data = await ffmpegInstance.readFile(fileName);
                 const blob = new Blob([data.buffer], { type: currentFile.type });
                 const url = URL.createObjectURL(blob);
 
@@ -235,10 +271,10 @@ async function processAudio() {
             }
         }
 
-        // Clean up FFmpeg filesystem
+        // Clean up
         log('Membersihkan file sementara...', 'info');
-        ffmpegInstance.FS('unlink', inputFileName);
-        // Note: In 0.11 we might not need to manually cleanup outputs if we re-run, but good practice
+        await ffmpegInstance.deleteFile(inputFileName); // 0.12 deleteFile
+        // Manually deleting outputs often good practice in long running sessions
 
         updateProgress(100);
         log(`Berhasil! Total ${audioSegments.length} segmen dibuat.`, 'success');
