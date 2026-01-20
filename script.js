@@ -36,7 +36,7 @@ const elements = {
     downloadAllBtn: document.getElementById('downloadAllBtn')
 };
 
-// ===== FFmpeg Initialization (v0.11 Single Threaded BULLETPROOF) =====
+// ===== FFmpeg Initialization (v0.11 Single Threaded SIMPLE) =====
 async function loadFFmpeg() {
     try {
         log('Memuat FFmpeg.wasm (v0.11 ST)...', 'info');
@@ -47,34 +47,15 @@ async function loadFFmpeg() {
 
         const { createFFmpeg, fetchFile } = FFmpeg;
 
-        // 1. Define the Single Threaded Core URL (v0.11.0 is stable for ST)
-        const coreScriptUrl = 'https://unpkg.com/@ffmpeg/core-st@0.11.1/dist/ffmpeg-core.js';
+        // Use the explicit Single Threaded Core URL
+        // This avoids SharedArrayBuffer requirements completely
+        const coreUrl = 'https://unpkg.com/@ffmpeg/core-st@0.11.1/dist/ffmpeg-core.js';
 
-        // 2. Fetch the Core Script content
-        log('Mengunduh Core Script...', 'info');
-        const response = await fetch(coreScriptUrl);
-        if (!response.ok) throw new Error(`Gagal download core: ${response.statusText}`);
-        let scriptText = await response.text();
+        log(`Menginisialisasi Core dari: ${coreUrl}`, 'info');
 
-        // CORRECTION: Patch the script to use absolute URL for WASM
-        // The script usually contains "ffmpeg-core.wasm" relative path.
-        // We replace it with the full CDN URL so the blob worker can find it.
-        const wasmUrl = 'https://unpkg.com/@ffmpeg/core-st@0.11.1/dist/ffmpeg-core.wasm';
-        scriptText = scriptText.replace(/ffmpeg-core\.wasm/g, wasmUrl);
-
-        // 3. Create a Blob URL for the script
-        // This tricks the browser into thinking the worker is "local" (same-origin), avoiding CORS errors
-        const blob = new Blob([scriptText], { type: 'text/javascript' });
-        const coreBlobUrl = URL.createObjectURL(blob);
-
-        log('Menginisialisasi Core...', 'info');
-
-        // 4. Initialize FFmpeg with the Blob URL
-        // We set mainName to 'main' to match what 0.11 expects in some configs, 
-        // but corePath is the key.
         ffmpegInstance = createFFmpeg({
             log: true,
-            corePath: coreBlobUrl,
+            corePath: coreUrl,
             logger: ({ message }) => log(message, 'info'),
             progress: ({ ratio }) => {
                 const percentage = Math.round(ratio * 100);
@@ -94,7 +75,13 @@ async function loadFFmpeg() {
     } catch (error) {
         console.error('Error loading FFmpeg:', error);
         log(`Error: ${error.message}`, 'error');
-        alert('Gagal memuat FFmpeg. Pastikan koneksi internet Anda stabil.');
+
+        // Fallback or helpful message if it fails
+        if (error.message.includes('SharedArrayBuffer')) {
+            alert('Browser Anda membutuhkan update atau tidak mendukung fitur keamanan yang diperlukan.');
+        } else {
+            alert('Gagal memuat FFmpeg. Pastikan koneksi internet Anda stabil.');
+        }
         return false;
     }
 }
