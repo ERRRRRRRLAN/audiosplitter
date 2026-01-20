@@ -54,7 +54,13 @@ async function loadFFmpeg() {
         log('Mengunduh Core Script...', 'info');
         const response = await fetch(coreScriptUrl);
         if (!response.ok) throw new Error(`Gagal download core: ${response.statusText}`);
-        const scriptText = await response.text();
+        let scriptText = await response.text();
+
+        // CORRECTION: Patch the script to use absolute URL for WASM
+        // The script usually contains "ffmpeg-core.wasm" relative path.
+        // We replace it with the full CDN URL so the blob worker can find it.
+        const wasmUrl = 'https://unpkg.com/@ffmpeg/core-st@0.11.1/dist/ffmpeg-core.wasm';
+        scriptText = scriptText.replace(/ffmpeg-core\.wasm/g, wasmUrl);
 
         // 3. Create a Blob URL for the script
         // This tricks the browser into thinking the worker is "local" (same-origin), avoiding CORS errors
